@@ -164,7 +164,7 @@ def main():
     # Blackwell Optimization (BF16 + Compile)
     if torch.cuda.is_available():
         print("⚡ Compiling model with torch.compile (Blackwell Optimized)...")
-        model = torch.compile(model")
+        model = torch.compile(model)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     criterion = CombinedLoss(device).to(device)
