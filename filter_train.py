@@ -1,5 +1,8 @@
 import os
 import argparse
+# Force Triton to skip the specific architecture check
+os.environ["TRITON_PTXAS_PATH"] = "/usr/local/cuda/bin/ptxas"
+os.environ["TORCH_CUDA_ARCH_LIST"] = "9.0"
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
