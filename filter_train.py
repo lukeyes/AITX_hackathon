@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 import torchvision.transforms.functional as TF
+from torchvision import transforms
 import coremltools as ct
 from huggingface_hub import HfApi, login
 import lpips
@@ -77,10 +78,6 @@ def apply_color_matrix(image, coeffs):
 # ==========================================
 class ProxyDataset(Dataset):
     def __init__(self, source_dir, target_dir, proxy_size=256, train_size=1024):
-        """
-        train_size: The fixed square size for High-Res training (e.g., 1024 or 2048).
-                    This ensures all images in a batch match perfectly.
-        """
         self.proxy_size = proxy_size
         self.train_size = train_size
         
@@ -89,52 +86,53 @@ class ProxyDataset(Dataset):
             print(f"⚠️ Warning: Data directories not found. Using Dummy Data mode.")
             self.files = []
         else:
-            # Filter for valid images
             valid_exts = ('.png', '.jpg', '.jpeg', '.webp')
             self.source_files = sorted([os.path.join(source_dir, f) for f in os.listdir(source_dir) if f.lower().endswith(valid_exts)])
             self.target_files = sorted([os.path.join(target_dir, f) for f in os.listdir(target_dir) if f.lower().endswith(valid_exts)])
             self.files = self.source_files
-            
-            # Sanity Check
-            if len(self.source_files) != len(self.target_files):
-                print(f"❌ Error: Source count ({len(self.source_files)}) != Target count ({len(self.target_files)})")
 
     def __len__(self): 
         return len(self.files) if self.files else 100 
     
     def __getitem__(self, idx):
         if not self.files:
-            # Dummy Data (Fixed size, so this never errors)
+            # Dummy Data (Large enough to be cropped)
             src = Image.fromarray(torch.randint(0, 255, (2048, 2048, 3), dtype=torch.uint8).numpy())
             tgt = Image.fromarray(torch.randint(0, 255, (2048, 2048, 3), dtype=torch.uint8).numpy())
         else:
             src = Image.open(self.source_files[idx]).convert("RGB")
             tgt = Image.open(self.target_files[idx]).convert("RGB")
         
-        # --- 1. Generate the Proxy Input (Always 256x256) ---
-        # We do this BEFORE cropping because the proxy needs to see the *whole* image to judge color.
+        # --- Safety Check: Ensure image is larger than crop size ---
+        # If the input image is smaller than 1024x1024, RandomCrop will crash.
+        # We force resize up if it's too small.
+        w_orig, h_orig = src.size
+        if w_orig < self.train_size or h_orig < self.train_size:
+            src = TF.resize(src, (self.train_size, self.train_size))
+            tgt = TF.resize(tgt, (self.train_size, self.train_size))
+
+        # --- 1. Proxy Generation (Before Crop) ---
         proxy = TF.resize(src, (self.proxy_size, self.proxy_size))
         
-        # --- 2. Synchronized Random Crop for Training (The Fix) ---
-        # We define crop parameters once, then apply to both Source and Target
-        # This ensures we train on a valid 1024x1024 square every time.
-        i, j, h, w = TF.RandomCrop.get_params(src, output_size=(self.train_size, self.train_size))
+        # --- 2. Synchronized Random Crop ---
+        # FIX: Use 'transforms.RandomCrop' (Class) not 'TF.RandomCrop' (Function)
+        i, j, h, w = transforms.RandomCrop.get_params(src, output_size=(self.train_size, self.train_size))
         
         src_crop = TF.crop(src, i, j, h, w)
         tgt_crop = TF.crop(tgt, i, j, h, w)
         
-        # --- 3. Synchronized Flips (Data Augmentation) ---
+        # --- 3. Synchronized Flips ---
         if random.random() > 0.5:
             src_crop = TF.hflip(src_crop)
             tgt_crop = TF.hflip(tgt_crop)
-            proxy = TF.hflip(proxy) # Proxy must flip too!
+            proxy = TF.hflip(proxy)
             
         return {
             "proxy": TF.to_tensor(proxy), 
             "source": TF.to_tensor(src_crop), 
             "target": TF.to_tensor(tgt_crop)
         }
-    
+     
 class CombinedLoss(nn.Module):
     def __init__(self, device):
         super().__init__()
